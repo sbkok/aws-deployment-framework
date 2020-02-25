@@ -171,6 +171,18 @@ class UpdateEvent(Event):
         )
 
 
+@dataclass
+class BranchNameNotUnique(Exception):
+    """
+    This exception is thrown when the user tries to upgrade to the same
+    version of ADF twice, where the first attempt has not been merged yet.
+
+    To fix, you need to merge the previous pull request that ADF
+    created. Alternatively, if something went wrong with that one, delete
+    the branch and deploy the ADF update once more.
+    """
+
+
 def generate_create_branch_input(event, repo_name, commit_id):
     return {
         "repositoryName": repo_name,
@@ -298,9 +310,19 @@ def update_(event: Mapping[str, Any], _context: Any, create_pr=False) -> Tuple[P
         repositoryName=repo_name,
         branchName=default_branch_name,
     )["branch"]["commitId"]
-    CC_CLIENT.create_branch(
-        **generate_create_branch_input(update_event, repo_name, commit_id)
-    )
+    branch_name = update_event.ResourceProperties.Version
+    try:
+        CC_CLIENT.create_branch(
+            **generate_create_branch_input(update_event, repo_name, commit_id),
+        )
+    except CC_CLIENT.exceptions.BranchNameExistsException:
+        raise BranchNameNotUnique(
+            f"The branch {branch_name} already exists in the {repo_name} "
+            f"repository. Your previous attempt to update has not been "
+            f"completed yet. Most likely, pull request {branch_name} "
+            f"needs to be merged. In case there is an issue with the "
+            f"{branch_name} branch, delete it and try updating again."
+        )
 
     if files_to_commit:
         try:
@@ -309,7 +331,7 @@ def update_(event: Mapping[str, Any], _context: Any, create_pr=False) -> Tuple[P
                     repo_name,
                     index,
                     parent_commit_id=commit_id,
-                    branch=update_event.ResourceProperties.Version,
+                    branch=branch_name,
                     puts=files
                 ))["commitId"]
                 create_pr = True # If the commit above was able to be made, we want to create a PR afterwards
@@ -322,7 +344,7 @@ def update_(event: Mapping[str, Any], _context: Any, create_pr=False) -> Tuple[P
                     repo_name,
                     index,
                     parent_commit_id=commit_id,
-                    branch=update_event.ResourceProperties.Version,
+                    branch=branch_name,
                     deletes=deletes
                 ))["commitId"]
         except (CC_CLIENT.exceptions.FileEntryRequiredException, CC_CLIENT.exceptions.NoChangeException):
